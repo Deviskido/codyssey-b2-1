@@ -3,13 +3,13 @@ from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-import calendar
+# import calendar  # Optional recurring feature is disabled.
 import csv
 import json
 import sqlite3
 import tempfile
-import zipfile
-from datetime import datetime
+# import zipfile  # Optional backup feature is disabled.
+# from datetime import datetime
 
 from .models import Transaction, date_value, month_value, positive
 from .storage import JsonStore, TransactionRepository
@@ -19,18 +19,22 @@ FIELDS = ['date', 'type', 'category', 'amount', 'memo', 'tags']
 
 class BudgetService:
     def __init__(self, directory: str):
+        """Initialize four file stores and seed default categories if their store is empty."""
         self.directory = Path(directory)
         self.transactions = TransactionRepository(self.directory / 'transactions.jsonl')
         self.categories = JsonStore(self.directory / 'categories.jsonl')
         self.budgets = JsonStore(self.directory / 'budgets.jsonl')
+        # Keep the legacy rules store for category and export overwrite protection.
         self.rules = JsonStore(self.directory / 'recurring.jsonl')
         if not self.category_names():
             self.categories.replace({'name': name} for name in ['food', 'transport', 'rent', 'salary', 'etc'])
 
     def category_names(self) -> list[str]:
+        """Return registered category names in stored order."""
         return [r['name'] for r in self.categories.records()]
 
     def category_change(self, name: str, remove: bool = False) -> None:
+        """Add a unique category or remove an unused one, rejecting invalid changes."""
         names = self.category_names()
         if not name.strip():
             raise ValueError('카테고리명을 입력하세요.')
@@ -47,11 +51,13 @@ class BudgetService:
         self.categories.replace({'name': n} for n in names)
 
     def add(self, values: dict[str, Any]) -> Transaction:
+        """Validate and save a new transaction, returning the created instance."""
         transaction = Transaction.create(values, self.category_names())
         self.transactions.add([transaction.record()])
         return transaction
 
     def update(self, identifier: str, values: dict[str, Any]) -> None:
+        """Validate and save selected fields of an existing transaction while preserving its ID."""
         for record in self.transactions.records():
             if record['id'] == identifier:
                 record.update(values)
@@ -61,6 +67,7 @@ class BudgetService:
         raise ValueError('없는 데이터입니다. list에서 ID를 확인하세요.')
 
     def filtered(self, **filters: Any) -> Iterator[dict[str, Any]]:
+        """Yield validated transactions matching every supplied date, category, type, memo, and tag filter."""
         start, end, month = filters.get('start'), filters.get('end'), filters.get('month')
         if start:
             date_value(start)
@@ -89,6 +96,7 @@ class BudgetService:
 
     def ordered(self, limit: int | None = None, **filters: Any) -> Iterator[dict[str, Any]]:
         # Bounded SQLite page cache and file-backed temporary sorting avoid a full Python list.
+        """Sort matches by descending date and storage order using temporary SQLite, with an optional limit."""
         with tempfile.TemporaryDirectory() as directory:
             db = sqlite3.connect(str(Path(directory) / 'sort.sqlite'))
             try:
@@ -108,6 +116,7 @@ class BudgetService:
                 db.close()
 
     def summary(self, month: str, top: int) -> dict[str, Any]:
+        """Return monthly income, expenses, balance, transaction count, top expense categories, and budget."""
         month_value(month)
         positive(top)
         income = expense = count = 0
@@ -124,14 +133,17 @@ class BudgetService:
                     top=sorted(totals.items(), key=lambda pair: (-pair[1], pair[0]))[:top], budget=budget)
 
     def set_budget(self, month: str, amount: int) -> None:
+        """Validate and save a monthly budget, replacing any previous amount for that month."""
         month_value(month)
         amount = positive(amount)
         def records() -> Iterator[dict[str, Any]]:
+            """Yield other monthly budgets followed by the new budget for the target month."""
             yield from (r for r in self.budgets.records() if r['month'] != month)
             yield {'month': month, 'amount': amount}
         self.budgets.replace(records())
 
     def import_csv(self, path: str) -> tuple[int, int]:
+        """Append valid CSV transactions with new IDs and return imported and skipped row counts."""
         imported = skipped = 0
         categories = self.category_names()
         with open(path, encoding='utf-8', newline='') as stream:
@@ -139,6 +151,7 @@ class BudgetService:
             if not set(FIELDS[:4]).issubset(reader.fieldnames or []):
                 raise ValueError('CSV 필수 헤더: date,type,category,amount를 확인하세요.')
             def records() -> Iterator[dict[str, Any]]:
+                """Validate CSV rows, report invalid rows, and yield valid records while counting both outcomes."""
                 nonlocal imported, skipped
                 for row in reader:
                     try:
@@ -156,6 +169,7 @@ class BudgetService:
         return imported, skipped
 
     def export_csv(self, path: str, **filters: Any) -> int:
+        """Export transactions for a month or date range to CSV and return the number written."""
         if not any(filters.get(k) for k in ('month', 'start', 'end')):
             raise ValueError('--month 또는 --from/--to 조건을 입력하세요.')
         if filters.get('month') and (filters.get('start') or filters.get('end')):
@@ -180,37 +194,41 @@ class BudgetService:
                 os.unlink(name)
         return count
 
-    def backup(self) -> Path:
-        target = self.directory / ('backup-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.zip')
-        with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
-            for store in (self.transactions, self.categories, self.budgets, self.rules):
-                archive.write(store.path, store.path.name)
-        return target
+    # def backup(self) -> Path:
+        # """Create a timestamped ZIP containing all four data files and return its path."""
+        # target = self.directory / ('backup-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.zip')
+        # with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
+            # for store in (self.transactions, self.categories, self.budgets, self.rules):
+                # archive.write(store.path, store.path.name)
+        # return target
 
-    def add_rule(self, name: str, day: int, values: dict[str, Any]) -> None:
-        if not name.strip() or any(r['name'] == name for r in self.rules.records()):
-            raise ValueError('비어 있지 않은 고유 규칙명을 입력하세요.')
-        if not 1 <= day <= 31:
-            raise ValueError('day는 1~31로 입력하세요.')
-        record = Transaction.create(dict(values, date=f'2000-01-{day:02d}'), self.category_names()).record()
-        record.update(name=name, day=day)
-        self.rules.replace(iter([*self.rules.records(), record]))
+    # def add_rule(self, name: str, day: int, values: dict[str, Any]) -> None:
+    #     """Validate and save a uniquely named recurring template for a day of the month."""
+    #     if not name.strip() or any(r['name'] == name for r in self.rules.records()):
+    #         raise ValueError('비어 있지 않은 고유 규칙명을 입력하세요.')
+    #     if not 1 <= day <= 31:
+    #         raise ValueError('day는 1~31로 입력하세요.')
+    #     record = Transaction.create(dict(values, date=f'2000-01-{day:02d}'), self.category_names()).record()
+    #     record.update(name=name, day=day)
+    #     self.rules.replace(iter([*self.rules.records(), record]))
 
-    def generate(self, month: str) -> int:
-        month_value(month)
-        year, number = map(int, month.split('-'))
-        existing = {r['id'] for r in self.transactions.records()}
-        count = 0
-        def records() -> Iterator[dict[str, Any]]:
-            nonlocal count
-            for rule in self.rules.records():
-                identifier = f"{rule['id']}-{month}"
-                if identifier in existing:
-                    continue
-                day = min(rule['day'], calendar.monthrange(year, number)[1])
-                record = {k: rule[k] for k in FIELDS if k != 'date'}
-                record.update(id=identifier, date=f'{month}-{day:02d}')
-                yield Transaction.create(record, self.category_names()).record()
-                count += 1
-        self.transactions.add(records())
-        return count
+    # def generate(self, month: str) -> int:
+    #     """Generate missing recurring transactions for a month, adjusting unavailable days to month-end."""
+    #     month_value(month)
+    #     year, number = map(int, month.split('-'))
+    #     existing = {r['id'] for r in self.transactions.records()}
+    #     count = 0
+    #     def records() -> Iterator[dict[str, Any]]:
+    #         """Yield validated recurring transactions whose rule-and-month IDs are not already stored."""
+    #         nonlocal count
+    #         for rule in self.rules.records():
+    #             identifier = f"{rule['id']}-{month}"
+    #             if identifier in existing:
+    #                 continue
+    #             day = min(rule['day'], calendar.monthrange(year, number)[1])
+    #             record = {k: rule[k] for k in FIELDS if k != 'date'}
+    #             record.update(id=identifier, date=f'{month}-{day:02d}')
+    #             yield Transaction.create(record, self.category_names()).record()
+    #             count += 1
+    #     self.transactions.add(records())
+    #     return count

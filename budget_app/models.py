@@ -7,6 +7,7 @@ import uuid
 
 
 def date_value(value: str) -> str:
+    """Validate a real calendar date in YYYY-MM-DD format and return it unchanged."""
     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
         raise ValueError('날짜 형식 오류. YYYY-MM-DD로 입력하세요.')
     datetime.strptime(value, '%Y-%m-%d')
@@ -14,12 +15,14 @@ def date_value(value: str) -> str:
 
 
 def month_value(value: str) -> str:
+    """Validate a month in YYYY-MM format and return it unchanged."""
     date_value(value + '-01')
     return value
 
 
 def positive(value: Any) -> int:
-    if isinstance(value, bool) or not re.fullmatch(r'[0-9]+', str(value)) or int(value) <= 0:
+    """Convert a positive integer value or digit string to int, rejecting other inputs."""
+    if isinstance(value, bool) or not re.fullmatch('[0-9]+', str(value)) or int(value) <= 0:
         raise ValueError('금액/개수는 양수 정수로 입력하세요.')
     return int(value)
 
@@ -36,6 +39,7 @@ class Transaction:
 
     @classmethod
     def create(cls, values: dict[str, Any], categories: list[str]) -> 'Transaction':
+        """Validate transaction fields, supply a missing ID, and normalize tags before creating an instance."""
         data = dict(values)
         data.setdefault('id', 'TX-' + uuid.uuid4().hex)
         data['date'] = date_value(data['date'])
@@ -57,4 +61,5 @@ class Transaction:
         return cls(**data)
 
     def record(self) -> dict[str, Any]:
+        """Return the transaction fields as a dictionary for serialization."""
         return asdict(self)

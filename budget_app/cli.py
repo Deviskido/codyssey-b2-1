@@ -5,15 +5,17 @@ from functools import wraps
 import sqlite3
 import sys
 from typing import Any, Callable
-import unicodedata
+# import unicodedata  # Optional aligned table output is disabled.
 
 from .models import positive
 from .service import BudgetService
 
 
 def handle_errors(function: Callable[..., int]) -> Callable[..., int]:
+    """Decorate a handler to report expected errors and return failure exit codes."""
     @wraps(function)
     def wrapped(*args: Any, **kwargs: Any) -> int:
+        """Run the handler, returning 1 for expected errors or 130 for keyboard cancellation."""
         try:
             return function(*args, **kwargs)
         except (ValueError, TypeError, KeyError, OSError, EOFError, csv.Error, sqlite3.Error) as error:
@@ -27,19 +29,23 @@ def handle_errors(function: Callable[..., int]) -> Callable[..., int]:
 
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
+        """Print usage and an error hint, then exit with status 2."""
         self.print_usage(sys.stderr)
         self.exit(2, f'[오류] {message}\n[힌트] --help로 사용법을 확인하세요.\n')
 
 
 def parser() -> argparse.ArgumentParser:
+    """Build the argument parser with all ledger commands, options, and help messages."""
     root = Parser(description='파일 기반 용돈 기입장')
     root.add_argument('--data-dir', default='./data', help='저장 폴더 (기본: ./data)')
     commands = root.add_subparsers(dest='command', required=True)
     def command(name: str, help_text: str) -> argparse.ArgumentParser:
+        """Register a command with help text and an optional data directory override."""
         result = commands.add_parser(name, help=help_text, description=help_text)
         result.add_argument('--data-dir', default=argparse.SUPPRESS, help='저장 폴더')
         return result
     def period(p: argparse.ArgumentParser) -> None:
+        """Add inclusive start and end date options to a command parser."""
         p.add_argument('--from', dest='start', help='시작 날짜 YYYY-MM-DD (포함)')
         p.add_argument('--to', dest='end', help='종료 날짜 YYYY-MM-DD (포함)')
     command('add', '대화형 거래 추가')
@@ -75,41 +81,44 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--out', required=True)
     p.add_argument('--month')
     period(p)
-    command('backup', '타임스탬프 ZIP 백업 생성')
-    p = command('recurring', '반복 거래 규칙 및 월별 생성')
-    sub = p.add_subparsers(dest='action', required=True)
-    sub.add_parser('add', help='규칙 대화형 등록')
-    sub.add_parser('list', help='등록 규칙 조회')
-    generate = sub.add_parser('generate', help='지정 월의 거래 생성')
-    generate.add_argument('--month', required=True)
+    # command('backup', '타임스탬프 ZIP 백업 생성')
+    # p = command('recurring', '반복 거래 규칙 및 월별 생성')
+    # sub = p.add_subparsers(dest='action', required=True)
+    # sub.add_parser('add', help='규칙 대화형 등록')
+    # sub.add_parser('list', help='등록 규칙 조회')
+    # generate = sub.add_parser('generate', help='지정 월의 거래 생성')
+    # generate.add_argument('--month', required=True)
     return root
 
 
 def inputs(include_date: bool = True) -> dict[str, str]:
+    """Prompt for transaction fields, omitting the date for recurring templates."""
     fields = [('date', '날짜(YYYY-MM-DD)'), ('type', '타입(income/expense)'),
               ('category', '카테고리'), ('amount', '금액(양수 정수)'),
               ('memo', '메모(선택)'), ('tags', '태그(쉼표 구분, 선택)')]
     return {key: input(label + ': ').strip() for key, label in fields if include_date or key != 'date'}
 
 
-def cell(value: Any, width: int) -> str:
-    text = str(value).replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-    result = ''
-    used = 0
-    for char in text:
-        size = 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
-        if used + size > width:
-            break
-        result += char
-        used += size
-    return result + ' ' * (width - used)
+# def cell(value: Any, width: int) -> str:
+#     """Sanitize, truncate, and pad text to a display width accounting for Korean characters."""
+#     text = str(value).replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+#     result = ''
+#     used = 0
+#     for char in text:
+#         size = 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
+#         if used + size > width:
+#             break
+#         result += char
+#         used += size
+#     return result + ' ' * (width - used)
 
 
 def show_transactions(records: Any) -> None:
-    print(f"{'ID':<43} | {'DATE':<10} | {'TYPE':<7} | {'CATEGORY':<16} | {'AMOUNT':>12} | MEMO / TAGS")
+    """Print transaction fields separated by bars, or an empty-data message if none exist."""
+    print("ID | DATE | TYPE | CATEGORY | AMOUNT | MEMO / TAGS")
     count = 0
     for r in records:
-        print(f"{r['id']:<43} | {r['date']} | {r['type']:<7} | {cell(r['category'], 16)} | {r['amount']:>12} | {cell(r['memo'], 30)} / {','.join(r['tags'])}")
+        print(f"{r['id']} | {r['date']} | {r['type']} | {r['category']} | {r['amount']} | {r['memo']} / {','.join(r['tags'])}")
         count += 1
     if not count:
         print('데이터 없음')
@@ -117,6 +126,7 @@ def show_transactions(records: Any) -> None:
 
 @handle_errors
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, execute the selected command, and return its exit status."""
     args = parser().parse_args(argv)
     service = BudgetService(args.data_dir)
     values = vars(args)
@@ -160,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 print('[경고] 예산 초과')
         print(f'지출 TOP {args.top}')
         for index, (category, amount) in enumerate(result['top'], 1):
-            print(f'{index}) {cell(category, 16)} {amount:>12}원')
+            print(f'{index}) {category} {amount}원')
     elif command == 'import':
         imported, skipped = service.import_csv(args.source)
         print(f'[완료] imported={imported}, skipped={skipped}')
@@ -168,17 +178,17 @@ def main(argv: list[str] | None = None) -> int:
     elif command == 'export':
         count = service.export_csv(args.out, **{k: values[k] for k in ['month', 'start', 'end']})
         print(f'[완료] {args.out} ({count} records)')
-    elif command == 'backup':
-        print('[완료] ' + str(service.backup()))
-    elif command == 'recurring':
-        if args.action == 'add':
-            name = input('규칙명: ').strip()
-            day = positive(input('매월 날짜(1~31): ').strip())
-            service.add_rule(name, day, inputs(include_date=False))
-            print('[저장 완료] ' + name)
-        elif args.action == 'list':
-            for rule in service.rules.records():
-                print(f"{rule['name']} | 매월 {rule['day']}일 | {rule['type']} | {rule['category']} | {rule['amount']}")
-        else:
-            print(f'[완료] generated={service.generate(args.month)}')
+    # elif command == 'backup':
+        # print('[완료] ' + str(service.backup()))
+    # elif command == 'recurring':
+    #     if args.action == 'add':
+    #         name = input('규칙명: ').strip()
+    #         day = positive(input('매월 날짜(1~31): ').strip())
+    #         service.add_rule(name, day, inputs(include_date=False))
+    #         print('[저장 완료] ' + name)
+    #     elif args.action == 'list':
+    #         for rule in service.rules.records():
+    #             print(f"{rule['name']} | 매월 {rule['day']}일 | {rule['type']} | {rule['category']} | {rule['amount']}")
+    #     else:
+    #         print(f'[완료] generated={service.generate(args.month)}')
     return 0

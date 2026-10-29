@@ -9,11 +9,13 @@ import tempfile
 
 class JsonStore:
     def __init__(self, path: Path):
+        """Open a store path, creating its parent directories and an empty file if needed."""
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
 
     def records(self) -> Iterator[dict[str, Any]]:
+        """Yield JSON objects one line at a time, reporting the location of malformed records."""
         with self.path.open(encoding='utf-8') as stream:
             for number, line in enumerate(stream, 1):
                 try:
@@ -25,6 +27,7 @@ class JsonStore:
                     raise ValueError(f'{self.path}:{number} 손상된 JSONL. 백업을 복구하세요: {error}') from error
 
     def replace(self, records: Iterable[dict[str, Any]]) -> None:
+        """Write records to a temporary file and atomically replace the store after flushing to disk."""
         name = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.path.parent,
@@ -42,13 +45,17 @@ class JsonStore:
 
 class TransactionRepository(JsonStore):
     def add(self, records: Iterable[dict[str, Any]]) -> None:
+        """Save existing records followed by new records through an atomic file replacement."""
         def combined() -> Iterator[dict[str, Any]]:
+            """Yield existing transactions followed by the supplied transactions."""
             yield from self.records()
             yield from records
         self.replace(combined())
 
     def change(self, identifier: str, replacement: dict[str, Any] | None) -> None:
+        """Replace a transaction by ID, or delete it when replacement is None; reject missing IDs."""
         def changed() -> Iterator[dict[str, Any]]:
+            """Yield the updated record stream and raise if the requested ID was not found."""
             found = False
             for record in self.records():
                 if record['id'] == identifier:

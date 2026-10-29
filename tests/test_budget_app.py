@@ -9,31 +9,36 @@ import tempfile
 import tracemalloc
 import unittest
 from unittest.mock import patch
-import zipfile
+# import zipfile  # Optional backup feature is disabled.
 
-from budget_app.cli import cell, main
+from budget_app.cli import main
+# from budget_app.cli import cell  # Optional aligned output is disabled.
 from budget_app.models import Transaction
 from budget_app.service import BudgetService
 
 
 class LedgerTests(unittest.TestCase):
     def setUp(self):
+        """Create an isolated temporary ledger and register its cleanup for each test."""
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.service = BudgetService(str(self.root / 'data'))
 
     def values(self, **changes):
+        """Build valid sample transaction fields with optional overrides."""
         return dict(dict(date='2024-01-15', type='expense', category='food', amount=15000,
                          memo='점심, 식사', tags=['meal', 'work']), **changes)
 
     def cli(self, *args, inputs=None):
+        """Run the CLI with simulated input and return its exit code and captured output."""
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), patch('builtins.input', side_effect=inputs or []):
             code = main(['--data-dir', str(self.service.directory), *args])
         return code, out.getvalue()
 
     def test_crud_persistence_and_order(self):
+        """Verify persistent CRUD operations, date ordering, tie ordering, and result limits."""
         first = self.service.add(self.values(date='2024-02-01'))
         second = self.service.add(self.values())
         third = self.service.add(self.values(date='2024-02-01'))
@@ -47,6 +52,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(len(list(reopened.filtered())), 2)
 
     def test_validation_and_missing_ids(self):
+        """Verify invalid fields and unknown transaction IDs are rejected without saving data."""
         for changes in [dict(date='2024-02-30'), dict(date='2024-1-01'), dict(amount=0),
                         dict(amount=-1), dict(amount='1.5'), dict(type='other'), dict(category='missing')]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -58,6 +64,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.service.transactions.path.read_text(), '')
 
     def test_search_summary_and_budget(self):
+        """Verify combined search filters, monthly totals, budget updates, and overspending warnings."""
         self.service.add(self.values())
         self.service.add(self.values(category='rent', amount=30000, tags=[]))
         self.service.add(self.values(type='income', category='salary', amount=100000))
@@ -80,6 +87,7 @@ class LedgerTests(unittest.TestCase):
                 list(self.service.filtered(**kwargs))
 
     def test_categories(self):
+        """Verify category persistence, duplicate rejection, and protection of categories in use."""
         self.service.category_change('한글')
         self.assertIn('한글', BudgetService(str(self.service.directory)).category_names())
         with self.assertRaises(ValueError):
@@ -90,6 +98,7 @@ class LedgerTests(unittest.TestCase):
             self.service.category_change('food', remove=True)
 
     def test_csv_round_trip_invalid_rows_and_export_protection(self):
+        """Verify CSV round trips, invalid-row handling, required headers, and safe export destinations."""
         self.service.add(self.values())
         path = self.root / 'out.csv'
         self.assertEqual(self.service.export_csv(str(path), month='2024-01'), 1)
@@ -118,6 +127,7 @@ class LedgerTests(unittest.TestCase):
             self.service.import_csv(str(path))
 
     def test_atomic_failure_preserves_original(self):
+        """Verify failed file replacements and unknown IDs leave the original store intact."""
         transaction = self.service.add(self.values())
         before = self.service.transactions.path.read_bytes()
         with patch('budget_app.storage.os.replace', side_effect=OSError('disk error')):
@@ -130,6 +140,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.service.transactions.path.read_bytes(), before)
 
     def test_corruption_and_file_failure_cli(self):
+        """Verify corrupt data and missing files produce useful CLI errors without tracebacks."""
         self.service.transactions.path.write_text('{bad}\n')
         code, output = self.cli('list')
         self.assertEqual(code, 1)
@@ -141,6 +152,7 @@ class LedgerTests(unittest.TestCase):
         self.assertNotIn('Traceback', output)
 
     def test_cli_interactive_and_mutations(self):
+        """Exercise interactive entry and mutation commands, including invalid inputs."""
         code, output = self.cli('add', inputs=['2024-01-01', 'expense', 'food', '50', '밥', 'meal'])
         self.assertEqual(code, 0)
         self.assertIn('id=TX-', output)
@@ -157,10 +169,10 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.cli('add', inputs=['bad', 'expense', 'food', '1', '', ''])[0], 1)
 
     def test_help_and_parser_exit_codes(self):
+        """Verify help works for every command and invalid options cause a nonzero exit."""
         commands = [[], ['add'], ['list'], ['search'], ['summary'], ['update'], ['delete'], ['import'], ['export'],
                     ['budget'], ['budget', 'set'], ['category'], ['category', 'add'], ['category', 'list'],
-                    ['category', 'remove'], ['backup'], ['recurring'], ['recurring', 'add'],
-                    ['recurring', 'list'], ['recurring', 'generate']]
+                    ['category', 'remove']]
         for command in commands:
             with self.subTest(command=command):
                 result = subprocess.run([sys.executable, '-m', 'budget_app', *command, '--help'], capture_output=True, text=True)
@@ -171,24 +183,27 @@ class LedgerTests(unittest.TestCase):
         self.assertIn('[힌트]', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
 
-    def test_backup_recurring_and_formatting(self):
-        self.service.add_rule('rent', 31, self.values())
-        self.assertEqual(self.service.generate('2024-02'), 1)
-        self.assertEqual(BudgetService(str(self.service.directory)).generate('2024-02'), 0)
-        self.assertEqual(next(self.service.filtered())['date'], '2024-02-29')
-        self.assertEqual(self.service.generate('2024-03'), 1)
-        with self.assertRaises(ValueError):
-            self.service.category_change('food', remove=True)
-        target = self.service.backup()
-        with zipfile.ZipFile(target) as archive:
-            self.assertEqual(set(archive.namelist()), {'transactions.jsonl', 'categories.jsonl', 'budgets.jsonl', 'recurring.jsonl'})
-            self.assertEqual(archive.read('transactions.jsonl'), self.service.transactions.path.read_bytes())
-        self.assertEqual(cell('한글abcdef', 6), '한글ab')
-        self.assertEqual(cell('한', 4), '한  ')
-        self.assertNotIn('\n', cell('a\nb', 5))
+    # def test_recurring_and_formatting(self):
+    #     """Verify recurring dates, duplicate prevention, and Korean table formatting."""
+    #     self.service.add_rule('rent', 31, self.values())
+    #     self.assertEqual(self.service.generate('2024-02'), 1)
+    #     self.assertEqual(BudgetService(str(self.service.directory)).generate('2024-02'), 0)
+    #     self.assertEqual(next(self.service.filtered())['date'], '2024-02-29')
+    #     self.assertEqual(self.service.generate('2024-03'), 1)
+    #     with self.assertRaises(ValueError):
+    #         self.service.category_change('food', remove=True)
+    #     # target = self.service.backup()
+    #     # with zipfile.ZipFile(target) as archive:
+    #         # self.assertEqual(set(archive.namelist()), {'transactions.jsonl', 'categories.jsonl', 'budgets.jsonl', 'recurring.jsonl'})
+    #         # self.assertEqual(archive.read('transactions.jsonl'), self.service.transactions.path.read_bytes())
+    #     self.assertEqual(cell('한글abcdef', 6), '한글ab')
+    #     self.assertEqual(cell('한', 4), '한  ')
+    #     self.assertNotIn('\n', cell('a\nb', 5))
 
     def test_commands_across_processes(self):
+        """Verify persistence and CSV transfer across CLI processes."""
         def run(*args, data_dir=None, input_text=None):
+            """Launch a CLI subprocess with optional input and data directory, capturing output and status."""
             return subprocess.run(
                 [sys.executable, '-m', 'budget_app', '--data-dir',
                  str(data_dir or self.service.directory), *args],
@@ -204,16 +219,17 @@ class LedgerTests(unittest.TestCase):
         result = run('import', '--from', str(path), data_dir=self.root / 'restored')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('15000', run('list', data_dir=self.root / 'restored').stdout)
-        result = run('recurring', 'add', input_text='월세\n31\nexpense\nrent\n500000\n\n\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('월세', run('recurring', 'list').stdout)
-        self.assertIn('generated=1', run('recurring', 'generate', '--month', '2024-02').stdout)
-        self.assertIn('generated=0', run('recurring', 'generate', '--month', '2024-02').stdout)
-        result = run('backup')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(list(self.service.directory.glob('backup-*.zip')))
+        # result = run('recurring', 'add', input_text='월세\n31\nexpense\nrent\n500000\n\n\n')
+        # self.assertEqual(result.returncode, 0, result.stderr)
+        # self.assertIn('월세', run('recurring', 'list').stdout)
+        # self.assertIn('generated=1', run('recurring', 'generate', '--month', '2024-02').stdout)
+        # self.assertIn('generated=0', run('recurring', 'generate', '--month', '2024-02').stdout)
+        # # result = run('backup')
+        # # self.assertEqual(result.returncode, 0, result.stderr)
+        # # self.assertTrue(list(self.service.directory.glob('backup-*.zip')))
 
     def test_large_ordered_query_bounded_python_memory(self):
+        """Verify all 12,000 transactions are sorted while traced Python memory stays below 4 MiB."""
         base = self.values(memo='x' * 500)
         self.service.transactions.replace(dict(base, id=f'TX-{i}', date=f'2024-01-{i % 28 + 1:02}') for i in range(12000))
         tracemalloc.start()
