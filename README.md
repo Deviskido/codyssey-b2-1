@@ -50,6 +50,141 @@ python3.12 -m budget_app import --from january.csv
 - 사용 중인 카테고리(거래 또는 반복 규칙에서 참조)는 삭제할 수 없습니다. 중복/빈 이름은 거부합니다.
 - 거래는 `|` 구분자로 출력합니다. 선택 기능인 고정 너비 표 정렬과 문자열 잘라내기는 비활성화했습니다.
 
+## 파서·서브파서·아규먼트 트리
+
+`python3.12 -m budget_app list --limit 3`에서 `list`는 수행할 **명령(command)**, `--limit`는 **옵션(option)**, `3`은 옵션의 값입니다. 이처럼 프로그램에 전달하는 입력을 넓게 **인자(argument)**라고 합니다.
+
+| 코드 | 역할 |
+| --- | --- |
+| `Parser()` | 프로그램 전체의 입력 규칙을 담는 최상위 파서 생성 |
+| `add_subparsers()` | 여러 하위 명령 중 하나를 선택하는 구조 생성 |
+| `add_parser("list")` | `list`라는 하위 명령과 그 명령의 파서 생성 |
+| `add_argument("--limit")` | 해당 파서가 받을 옵션과 값의 규칙 등록 |
+
+아래는 `budget_app/cli.py`의 현재 활성화된 전체 구조입니다. `[파서]`는 입력 규칙을 담는 객체이고, `[명령 선택]`은 `add_subparsers()`로 생성한 구조입니다. 모든 파서에 자동으로 추가되는 `-h / --help`는 반복을 줄이기 위해 트리에서 생략했습니다.
+
+```text
+root [최상위 파서: Parser()]
+│
+├── --data-dir → args.data_dir
+│   └── 기본값: "./data"
+│
+└── commands [명령 선택: dest="command", required=True]
+    │
+    ├── add [파서] → args.command = "add"
+    │   └── --data-dir
+    │
+    ├── list [파서] → args.command = "list"
+    │   ├── --data-dir
+    │   └── --limit → args.limit
+    │       └── 양수 정수, 기본값: 20
+    │
+    ├── search [파서] → args.command = "search"
+    │   ├── --data-dir
+    │   ├── --from     → args.start
+    │   ├── --to       → args.end
+    │   ├── --category → args.category
+    │   ├── --type     → args.type
+    │   │   └── income 또는 expense
+    │   ├── --q        → args.q
+    │   └── --tag      → args.tag
+    │
+    ├── update [파서] → args.command = "update"
+    │   ├── --data-dir
+    │   ├── --id       → args.id        [필수]
+    │   ├── --date     → args.date
+    │   ├── --type     → args.type
+    │   ├── --category → args.category
+    │   ├── --amount   → args.amount
+    │   ├── --memo     → args.memo
+    │   └── --tags     → args.tags
+    │
+    ├── delete [파서] → args.command = "delete"
+    │   ├── --data-dir
+    │   └── --id → args.id              [필수]
+    │
+    ├── summary [파서] → args.command = "summary"
+    │   ├── --data-dir
+    │   ├── --month → args.month        [필수]
+    │   └── --top   → args.top
+    │       └── 양수 정수, 기본값: 3
+    │
+    ├── budget [파서] → args.command = "budget"
+    │   ├── --data-dir
+    │   └── sub [명령 선택: dest="action", required=True]
+    │       └── set [파서] → args.action = "set"
+    │           ├── --month  → args.month   [필수]
+    │           └── --amount → args.amount  [필수・양수 정수]
+    │
+    ├── category [파서] → args.command = "category"
+    │   ├── --data-dir
+    │   └── sub [명령 선택: dest="action", required=True]
+    │       ├── add    [파서] → args.action = "add"
+    │       ├── list   [파서] → args.action = "list"
+    │       └── remove [파서] → args.action = "remove"
+    │
+    ├── import [파서] → args.command = "import"
+    │   ├── --data-dir
+    │   └── --from → args.source        [필수]
+    │
+    └── export [파서] → args.command = "export"
+        ├── --data-dir
+        ├── --out   → args.out          [필수]
+        ├── --month → args.month
+        ├── --from  → args.start
+        └── --to    → args.end
+```
+
+각 하위 명령의 `--data-dir`도 `args.data_dir`에 저장됩니다. 기본값은 `argparse.SUPPRESS`이므로 생략하면 최상위 파서에서 설정한 값을 덮어쓰지 않습니다. `budget set`의 `set`이나 `category add/list/remove`에는 이 옵션을 별도로 등록하지 않았으므로 `--data-dir`는 `budget`/`category` 앞이나 바로 뒤에 지정합니다.
+
+일반 옵션은 별도 기본값이 없으면 생략 시 `None`이 됩니다. `dest`는 결과 속성 이름을 지정합니다. 따라서 `search --from`은 `args.start`, `import --from`은 `args.source`에 값을 저장합니다. 트리의 `[필수]`는 파서가 검사하는 필수 옵션입니다. `update`의 변경 필드 하나 이상 지정과 `export`의 월 또는 기간 지정은 파싱 후 실행 코드에서 추가로 검사합니다.
+
+### 입력이 args에 저장되는 과정
+
+다음 명령은 트리에서 **root → budget → set** 경로로 분석됩니다.
+
+```sh
+python3.12 -m budget_app --data-dir ./sample budget set --month 2026-10 --amount 50000
+```
+
+`parse_args()`의 결과는 선택한 경로의 값을 하나에 모은 `Namespace` 객체입니다.
+
+```python
+Namespace(
+    data_dir='./sample',
+    command='budget',
+    action='set',
+    month='2026-10',
+    amount=50000
+)
+```
+
+객체의 속성은 점으로 읽습니다. 딕셔너리로 보고 싶다면 `vars(args)`를 사용합니다.
+
+```python
+args.command              # "budget"
+args.action               # "set"
+args.amount               # 50000
+vars(args)["amount"]      # 50000
+```
+
+### 대화형 입력과 파서의 구분
+
+`add`의 날짜·금액 등은 명령줄 옵션이 아닙니다. 명령을 파싱한 뒤 `inputs()`가 질문하고 별도의 딕셔너리를 반환합니다.
+
+```text
+add 명령 파싱 완료
+└── inputs() 호출 → 입력 결과 딕셔너리 반환
+    ├── 날짜       → "date"
+    ├── 타입       → "type"
+    ├── 카테고리   → "category"
+    ├── 금액       → "amount"
+    ├── 메모       → "memo"
+    └── 태그       → "tags"
+```
+
+`category add/remove`의 카테고리 이름도 파싱 후 `input()`으로 받습니다. `backup`과 `recurring`은 주석 처리되어 현재 파서 트리에 등록되지 않습니다.
+
 ## 저장 파일
 
 기본 경로는 **현재 작업 디렉터리의 `./data`**입니다. 초기 실행 시 폴더와 파일을 생성합니다. 빈 카테고리 파일에는 `food`, `transport`, `rent`, `salary`, `etc`를 자동 등록합니다.
@@ -105,6 +240,24 @@ export는 `--month` 또는 `--from`/`--to`가 필수이며 월과 기간 조건�
 원자적 교체를 수행하는 `JsonStore.replace()`는 필수 추가·수정·삭제의 공통 저장 경로이므로 유지합니다. 기존 `recurring.jsonl`은 삭제하지 않으며, 해당 규칙이 참조하는 카테고리 삭제와 파일 덮어쓰기 보호도 유지합니다. 이전 ZIP 백업은 표준 `zipfile` 모듈로 별도 폴더에 풀어 확인할 수 있습니다.
 
 ## 구조와 검증
+
+### 콘솔 시나리오 자동 실행
+
+macOS/Linux에서 다음 명령으로 [CONSOLE_SCENARIOS.md](CONSOLE_SCENARIOS.md)의 콘솔 시나리오 전체를 실행할 수 있습니다.
+
+```sh
+python3.12 run_console_scenarios.py
+```
+
+[run_console_scenarios.py](run_console_scenarios.py)는 문서의 `sh` 코드 블록을 순서대로 실행합니다. 대화형 질문이 나오면 문서의 입력 예시에 따라 자동으로 답하고, 실행 명령·질문·입력값·표준 출력·오류 출력을 모두 콘솔에 실시간으로 표시합니다. 거래 추가로 생성된 실제 ID는 이후 수정·삭제 명령에 자동으로 넣습니다. 문서의 셸 명령을 실제 실행하므로 이 프로젝트에서 검토한 문서를 대상으로 사용하세요.
+
+실행마다 새로운 임시 폴더를 만들고 문서의 `./console-test` 경로를 그 폴더로 바꿉니다. 시작과 종료 시 표시되는 `transcript.log`에 전체 입출력 기록을 저장하며, 테스트 데이터와 로그는 실행 후에도 확인할 수 있도록 남깁니다. 임시 폴더는 운영체제가 나중에 정리할 수 있습니다. Python 명령은 스크립트를 실행한 인터프리터로 통일합니다.
+
+각 명령의 실제 종료 코드를 문서의 예상 코드와 비교합니다. 오류를 의도한 단계는 예상대로 1 또는 2로 종료하면 계속 진행하고, 코드가 다르면 중단합니다. 문서 마지막의 자동 테스트도 실행합니다. 화면 내용은 실제 출력을 그대로 보여주며 예상 화면과의 자동 문자열 비교는 하지 않습니다.
+
+명령별 제한 시간은 기본 60초입니다. 느린 환경에서는 `python3.12 run_console_scenarios.py --timeout 120`으로 늘릴 수 있고, `Ctrl+C`로 중단할 수 있습니다.
+
+### 코드 구조와 자동 테스트
 
 - `models.py`: `Transaction` dataclass, 날짜/월/금액 검증, 명시적 타입 힌트. 예를 들어 `positive(value) -> int`는 검증된 양수 정수를 반환합니다.
 - `storage.py`: `JsonStore`, `TransactionRepository`. `records()`는 `yield`로 한 줄씩 읽고 파일 변경은 원자적 교체로 수행합니다.

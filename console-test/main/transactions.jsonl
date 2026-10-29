@@ -1,0 +1,2 @@
+{"id": "TX-b8d26b2fbe1b490ea7cafc542a98667f", "type": "income", "date": "2026-10-01", "amount": 100000, "category": "salary", "memo": "용돈", "tags": ["allowance"]}
+{"id": "TX-bc610f3e231748ecad9351fbf80e94a8", "type": "expense", "date": "2026-10-10", "amount": 15000, "category": "food", "memo": "점심, 친구", "tags": ["meal", "friend"]}
